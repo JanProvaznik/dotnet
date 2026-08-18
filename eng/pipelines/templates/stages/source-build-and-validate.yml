@@ -95,7 +95,7 @@ stages:
             artifactsRid: ${{ variables.ubuntuX64Rid }}
           ${{ if ne(leg.reuseBuildArtifactsFrom, '') }}:
             reuseBuildArtifactsFrom:
-            - ${{ format(leg.reuseBuildArtifactsFrom, variables.centOSStreamName) }}
+            - ${{ format(leg.reuseBuildArtifactsFrom, variables.ubuntuName) }}
         # AlmaLinux
         ${{ elseif eq(leg.distro, 'almalinux') }}:
           buildName: ${{ format(leg.buildNameFormat, variables.almaLinuxName) }}
@@ -106,7 +106,7 @@ stages:
           targetRid: ${{ variables.almaLinuxX64Rid }}
           ${{ if ne(leg.reuseBuildArtifactsFrom, '') }}:
             reuseBuildArtifactsFrom:
-            - ${{ format(leg.reuseBuildArtifactsFrom, variables.centOSStreamName) }}
+            - ${{ format(leg.reuseBuildArtifactsFrom, variables.almaLinuxName) }}
         # Alpine
         ${{ elseif eq(leg.distro, 'alpine') }}:
           buildName: ${{ format(leg.buildNameFormat, variables.alpineName) }}
@@ -119,7 +119,7 @@ stages:
           disableComponentGovernance: true
           ${{ if ne(leg.reuseBuildArtifactsFrom, '') }}:
             reuseBuildArtifactsFrom:
-            - ${{ format(leg.reuseBuildArtifactsFrom, variables.centOSStreamName) }}
+            - ${{ format(leg.reuseBuildArtifactsFrom, variables.alpineName) }}
         
         targetArchitecture: ${{ leg.targetArchitecture }}
         isBuiltFromVmr: ${{ parameters.isBuiltFromVmr }}

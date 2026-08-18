@@ -84,21 +84,48 @@ parameters:
   type: boolean
   default: false
 
+# Appended to the stage names and display names so this template can be instantiated more than once
+# in a pipeline. The bootstrap validation pipeline builds every vertical twice, once per stage.
+- name: stageNameSuffix
+  type: string
+  default: ''
+
+# Stages these stages depend on. Empty means they start immediately, which is what every pipeline
+# other than bootstrap validation wants.
+- name: stageDependsOn
+  type: object
+  default: []
+
+# True for the second stage of the bootstrap validation pipeline, where every leg rebuilds using the
+# toolset the first stage produced. Forwarded to the variables template, which turns on the
+# bootstrap steps and scopes artifact names for the whole stage.
+- name: bootstrapStage
+  type: boolean
+  default: false
+
+# Source indexing uploads to shared production storage under a fixed name and is only meaningful for
+# the official build. Pipelines that build the same verticals for validation turn it off so they
+# don't overwrite the official index - twice per run, in the bootstrap pipeline's case.
+- name: enableSourceIndex
+  type: boolean
+  default: true
+
 stages:
 
 #### VERTICAL BUILD (Validation) ####
 - ${{ if and(notin(parameters.scope, 'scout'), or(and(eq(variables['Build.Reason'], 'PullRequest'), containsValue(parameters.verifications, 'unified-build-linux-buildtests')), and(ne(variables['Build.Reason'], 'PullRequest'), ne(variables['System.TeamProject'], 'internal'), containsValue(parameters.verifications, 'unified-build-windows-buildtests')))) }}:
-  - stage: VMR_Vertical_Build_Validation
-    displayName: VMR Vertical Build Validation
+  - stage: VMR_Vertical_Build_Validation${{ parameters.stageNameSuffix }}
+    displayName: VMR Vertical Build Validation${{ parameters.stageNameSuffix }}
     templateContext:
       validationOnly: true
-    dependsOn: []
+    dependsOn: ${{ parameters.stageDependsOn }}
     variables:
     - template: ../variables/vmr-build.yml
       parameters:
         desiredSigning: ${{ parameters.desiredSigning }}
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         desiredFinalVersionKind: ${{ parameters.desiredFinalVersionKind }}
+        bootstrapStage: ${{ parameters.bootstrapStage }}
     jobs:
 
     - ${{ if containsValue(parameters.verifications, 'unified-build-linux-buildtests') }}:
@@ -128,15 +155,16 @@ stages:
 
 #### VERTICAL BUILD (Official) ####
 - ${{ if and(notin(parameters.scope, 'scout'), or(in(parameters.scope, 'full') , contains(join(';', parameters.verifications), 'unified-build-'))) }}:
-  - stage: VMR_Vertical_Build
-    displayName: VMR Vertical Build
-    dependsOn: []
+  - stage: VMR_Vertical_Build${{ parameters.stageNameSuffix }}
+    displayName: VMR Vertical Build${{ parameters.stageNameSuffix }}
+    dependsOn: ${{ parameters.stageDependsOn }}
     variables:
     - template: ../variables/vmr-build.yml
       parameters:
         desiredSigning: ${{ parameters.desiredSigning }}
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         desiredFinalVersionKind: ${{ parameters.desiredFinalVersionKind }}
+        bootstrapStage: ${{ parameters.bootstrapStage }}
     jobs:
 
     - ${{ if containsValue(parameters.verifications, 'unified-build-windows-x64') }}:
@@ -151,8 +179,9 @@ stages:
           targetOS: windows
           targetArchitecture: x64
           brandingType: ${{ variables.brandingType }}
-          sourceIndexName: dotnet-dotnet-windows
-          sourceIndexIncludeRepos: 'winforms wpf windowsdesktop aspnetcore'
+          ${{ if eq(parameters.enableSourceIndex, true) }}:
+            sourceIndexName: dotnet-dotnet-windows
+            sourceIndexIncludeRepos: 'winforms wpf windowsdesktop aspnetcore'
 
     - ${{ if containsValue(parameters.verifications, 'unified-build-windows-x86') }}:
       - template: ../jobs/vmr-build.yml
@@ -800,9 +829,9 @@ stages:
 
 #### VERTICAL BUILD (Scouting) ####
 - ${{ if in(parameters.scope, 'scout') }}:
-  - stage: VMR_Vertical_Build_Scout
-    displayName: VMR Vertical Build
-    dependsOn: []
+  - stage: VMR_Vertical_Build_Scout${{ parameters.stageNameSuffix }}
+    displayName: VMR Vertical Build${{ parameters.stageNameSuffix }}
+    dependsOn: ${{ parameters.stageDependsOn }}
     variables:
     - template: ../variables/vmr-build.yml
       parameters:
@@ -810,6 +839,7 @@ stages:
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         desiredFinalVersionKind: ${{ parameters.desiredFinalVersionKind }}
         isScoutingJob: true
+        bootstrapStage: ${{ parameters.bootstrapStage }}
     jobs:
 
     - template: ../jobs/vmr-build.yml

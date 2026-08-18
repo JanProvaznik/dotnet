@@ -1,0 +1,116 @@
+### Downloads the SDK and bootstrap toolset packages produced by the first stage of the bootstrap
+### validation pipeline and points the build at them.
+###
+### Every step here is gated on the runtime `bootstrapEnabled` variable, which only the second stage
+### of eng/pipelines/bootstrap-validation.yml sets (see templates/variables/vmr-build.yml). In every
+### other pipeline these steps are present but skipped, so no per-leg wiring is needed and legs
+### added to the official build in future are covered automatically.
+
+parameters:
+# Name of the first-stage vertical whose artifacts hold the SDK for this leg's *host* platform.
+- name: hostVertical
+  type: string
+
+# Name of the first-stage vertical whose artifacts hold the bootstrap toolset packages. Not every
+# vertical publishes them - the macOS verticals publish only aspnetcore/emsdk/runtime packages - but
+# they are platform-agnostic .nupkg files, so any vertical that does publish them will do.
+- name: packagesVertical
+  type: string
+
+# Extension of the SDK archive to look for. Windows verticals publish both .zip and .tar.gz.
+- name: archiveExtension
+  type: string
+
+- name: isWindows
+  type: boolean
+
+steps:
+- task: DownloadPipelineArtifact@2
+  displayName: Download Bootstrap SDK (${{ parameters.hostVertical }})
+  condition: and(succeeded(), eq(variables['bootstrapEnabled'], 'true'))
+  inputs:
+    artifactName: ${{ parameters.hostVertical }}_Artifacts
+    itemPattern: assets/*/Sdk/**/dotnet-sdk-*${{ parameters.archiveExtension }}
+    targetPath: $(bootstrapDownloadDir)
+
+# Only Arcade's packages are needed. Every other repo already builds against the Arcade SDK produced
+# by the current build (see DiscoverBuiltSdkOverrides in repo-projects/Directory.Build.targets); the
+# repos listed in BootstrapArcadeRepos - arcade itself and source-build-assets - are the ones that
+# fall back to the bootstrap version, so that is what has to come from the previous stage. Pulling
+# the whole package set instead would mean gigabytes per leg for no added coverage.
+- task: DownloadPipelineArtifact@2
+  displayName: Download Bootstrap Packages (${{ parameters.packagesVertical }})
+  condition: and(succeeded(), eq(variables['bootstrapEnabled'], 'true'))
+  inputs:
+    artifactName: ${{ parameters.packagesVertical }}_Artifacts
+    itemPattern: |
+      packages/*/NonShipping/arcade/**
+      packages/*/Shipping/arcade/**
+    targetPath: $(bootstrapPackagesDownloadDir)
+
+- ${{ if eq(parameters.isWindows, true) }}:
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+
+      $archive = Get-ChildItem -Path '$(bootstrapDownloadDir)' -Recurse -File -Filter 'dotnet-sdk-*${{ parameters.archiveExtension }}' |
+        Select-Object -First 1
+      if ($null -eq $archive) {
+        Write-Host "##vso[task.logissue type=error]No dotnet-sdk-*${{ parameters.archiveExtension }} found under '$(bootstrapDownloadDir)'."
+        Get-ChildItem -Path '$(bootstrapDownloadDir)' -Recurse | Select-Object -ExpandProperty FullName
+        exit 1
+      }
+
+      Write-Host "Extracting bootstrap SDK '$($archive.FullName)'"
+      New-Item -ItemType Directory -Force -Path '$(bootstrapSdkDir)' | Out-Null
+      # ZipFile rather than Expand-Archive: the SDK archive holds tens of thousands of entries and
+      # Expand-Archive is an order of magnitude slower, which adds up over the Windows legs.
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      [System.IO.Compression.ZipFile]::ExtractToDirectory($archive.FullName, '$(bootstrapSdkDir)')
+
+      # Flatten the downloaded packages so the directory can be used directly as a NuGet source.
+      New-Item -ItemType Directory -Force -Path '$(bootstrapPackagesDir)' | Out-Null
+      Get-ChildItem -Path '$(bootstrapPackagesDownloadDir)' -Recurse -File -Filter '*.nupkg' |
+        ForEach-Object { Copy-Item $_.FullName -Destination '$(bootstrapPackagesDir)' -Force }
+
+      $packageCount = (Get-ChildItem -Path '$(bootstrapPackagesDir)' -File -Filter '*.nupkg').Count
+      Write-Host "Staged $packageCount bootstrap package(s)"
+
+      $bootstrapArgs = "-withSdk $(bootstrapSdkDir)"
+      if ($packageCount -gt 0) {
+        $bootstrapArgs = "$bootstrapArgs -withPackages $(bootstrapPackagesDir)"
+      }
+      Write-Host "Bootstrap arguments: $bootstrapArgs"
+      Write-Host "##vso[task.setvariable variable=bootstrapArguments]$bootstrapArgs"
+    displayName: Prepare Bootstrap Toolset
+    condition: and(succeeded(), eq(variables['bootstrapEnabled'], 'true'))
+
+- ${{ else }}:
+  - script: |
+      set -euo pipefail
+
+      archive=$(find "$(bootstrapDownloadDir)" -name "dotnet-sdk-*${{ parameters.archiveExtension }}" | head -n 1)
+      if [ -z "$archive" ]; then
+        echo "##vso[task.logissue type=error]No dotnet-sdk-*${{ parameters.archiveExtension }} found under '$(bootstrapDownloadDir)'."
+        ls -R "$(bootstrapDownloadDir)" || true
+        exit 1
+      fi
+
+      echo "Extracting bootstrap SDK '$archive'"
+      mkdir -p "$(bootstrapSdkDir)"
+      tar -xzf "$archive" -C "$(bootstrapSdkDir)"
+
+      # Flatten the downloaded packages so the directory can be used directly as a NuGet source.
+      mkdir -p "$(bootstrapPackagesDir)"
+      find "$(bootstrapPackagesDownloadDir)" -name '*.nupkg' -exec cp -f {} "$(bootstrapPackagesDir)" \;
+
+      packageCount=$(find "$(bootstrapPackagesDir)" -maxdepth 1 -name '*.nupkg' | wc -l | tr -d ' ')
+      echo "Staged $packageCount bootstrap package(s)"
+
+      bootstrapArgs="--with-sdk $(bootstrapSdkDir)"
+      if [ "$packageCount" != "0" ]; then
+        bootstrapArgs="$bootstrapArgs --with-packages $(bootstrapPackagesDir)"
+      fi
+      echo "Bootstrap arguments: $bootstrapArgs"
+      echo "##vso[task.setvariable variable=bootstrapArguments]$bootstrapArgs"
+    displayName: Prepare Bootstrap Toolset
+    condition: and(succeeded(), eq(variables['bootstrapEnabled'], 'true'))

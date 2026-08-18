@@ -17,6 +17,12 @@ parameters:
   type: boolean
   default: false
 
+# True for the second stage of the bootstrap validation pipeline, where every leg rebuilds using
+# the toolset the first stage produced. See eng/pipelines/bootstrap-validation.yml.
+- name: bootstrapStage
+  type: boolean
+  default: false
+
 # This is the official production build
 - name: isOfficialBuild
   type: boolean
@@ -25,6 +31,22 @@ parameters:
 variables:
 - name: _TeamName
   value: DotNetCore
+
+# Scopes the names of the artifacts a stage publishes and consumes. The bootstrap validation
+# pipeline runs the same jobs twice, once per stage, and job names only have to be unique within a
+# stage while artifact names are unique across the whole run. Prefixing here means the two stages
+# don't collide, and it means the build-pass 2/3 join points inside stage 2 pick up stage 2's own
+# outputs rather than stage 1's, without every leg having to be renamed.
+- ${{ if eq(parameters.bootstrapStage, true) }}:
+  - name: bootstrapEnabled
+    value: 'true'
+  - name: artifactNamePrefix
+    value: 'Stage2_'
+- ${{ else }}:
+  - name: bootstrapEnabled
+    value: 'false'
+  - name: artifactNamePrefix
+    value: ''
 
 - name: defaultContainerOptions
   value: --privileged --ulimit nofile=65536:65536

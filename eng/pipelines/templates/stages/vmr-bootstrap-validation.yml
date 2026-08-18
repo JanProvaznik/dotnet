@@ -1,0 +1,318 @@
+### Two-stage bootstrap validation.
+###
+### Stage 1 builds every vertical the official build produces, exactly as the official build does.
+### Stage 2 builds all of them again, but each leg rebuilds using the SDK and toolset packages that
+### stage 1 produced instead of the last-known-good SDK pinned in global.json. If stage 2 is green,
+### the product on this commit can build itself on every platform we ship.
+###
+### This generalizes what the Linux source-build legs already do in the official build
+### (SB_CentOSStream10_Online_MsftSdk -> SB_CentOSStream10_Offline_CurrentSourceBuiltSdk) to the
+### Microsoft verticals, which had no bootstrap coverage at all.
+###
+### The two stages run the same jobs, so job names repeat between them. That is fine - job names
+### only have to be unique within a stage. Artifact names are unique across the run, so stage 2
+### prefixes them via the bootstrapStage parameter of templates/variables/vmr-build.yml. That prefix
+### also redirects the build-pass 2/3 join points inside stage 2 onto stage 2's own outputs.
+
+parameters:
+- name: desiredSigning
+  type: string
+  default: 'Unsigned'
+
+- name: desiredFinalVersionKind
+  type: string
+  default: ''
+
+# Indicates whether runtime dependent jobs are excluded.
+- name: excludeRuntimeDependentJobs
+  type: boolean
+  default: false
+
+# Whether to run tests on top of each build.
+- name: runTests
+  type: boolean
+  default: true
+
+# Whether to include the Linux source-build legs.
+- name: includeSourceBuild
+  type: boolean
+  default: true
+
+# Five build-pass-1 verticals in vmr-verticals.yml are gated on this list rather than on scope, and
+# the build-pass 2/3 legs take dependencies on them. Windows_x64 in particular is the bootstrap SDK
+# source for every Windows leg, so this list is not optional. The buildtests verifications are left
+# out deliberately: they produce a separate validation stage that is not wanted here.
+- name: verifications
+  type: object
+  default:
+  - unified-build-android-arm64
+  - unified-build-browser-wasm
+  - unified-build-iossimulator-arm64
+  - unified-build-windows-x64
+  - unified-build-windows-x86
+
+# These are not expected to be passed in but rather just object variables reused below
+- name: pool_Linux
+  type: object
+  default:
+    name: $(defaultPoolName)
+    image: $(poolImage_Linux)
+    demands: ImageOverride -equals $(poolImage_Linux)
+    os: linux
+
+- name: pool_LinuxArm64
+  type: object
+  default:
+    name: $(poolName_LinuxArm64)
+    image: $(poolImage_LinuxArm64)
+    demands: ImageOverride -equals $(poolImage_LinuxArm64)
+    hostArchitecture: Arm64
+    os: linux
+
+stages:
+
+#### STAGE 1 - build every vertical from the last-known-good SDK ####
+- template: vmr-verticals.yml
+  parameters:
+    stageNameSuffix: _Stage1
+    desiredSigning: ${{ parameters.desiredSigning }}
+    desiredFinalVersionKind: ${{ parameters.desiredFinalVersionKind }}
+    isOfficialBuild: false
+    isBuiltFromVmr: true
+    scope: full
+    excludeRuntimeDependentJobs: ${{ parameters.excludeRuntimeDependentJobs }}
+    enableSourceIndex: false
+    verifications: ${{ parameters.verifications }}
+
+#### STAGE 2 - build them all again from the toolset stage 1 just produced ####
+# Depends on the whole of stage 1: a leg's bootstrap SDK comes from the vertical matching its host
+# platform, and the build-pass 2/3 legs join across verticals, so there is no useful subset to
+# depend on. This costs wall-clock time compared to job-level fan-in, but keeps the two halves of
+# the run cleanly separated and makes a stage-2 failure unambiguous.
+- template: vmr-verticals.yml
+  parameters:
+    stageNameSuffix: _Stage2
+    stageDependsOn:
+    - VMR_Vertical_Build_Stage1
+    bootstrapStage: true
+    desiredSigning: ${{ parameters.desiredSigning }}
+    desiredFinalVersionKind: ${{ parameters.desiredFinalVersionKind }}
+    isOfficialBuild: false
+    isBuiltFromVmr: true
+    scope: full
+    excludeRuntimeDependentJobs: ${{ parameters.excludeRuntimeDependentJobs }}
+    enableSourceIndex: false
+    verifications: ${{ parameters.verifications }}
+
+#### SOURCE-BUILD ####
+# Source-build expresses its two stages as job-level dependencies inside a single stage rather than
+# as separate pipeline stages, so it is included once here with a legs list in which every leg that
+# produces a usable SDK has a *_Offline_CurrentSourceBuiltSdk counterpart that rebuilds from it.
+- ${{ if eq(parameters.includeSourceBuild, true) }}:
+  - template: source-build-and-validate.yml
+    parameters:
+      pool_Linux: ${{ parameters.pool_Linux }}
+      pool_LinuxArm64: ${{ parameters.pool_LinuxArm64 }}
+      isBuiltFromVmr: true
+      isOfficialBuild: false
+      desiredSigning: ${{ parameters.desiredSigning }}
+      desiredFinalVersionKind: ${{ parameters.desiredFinalVersionKind }}
+      excludeRuntimeDependentJobs: ${{ parameters.excludeRuntimeDependentJobs }}
+      # Run the tests in the same job as the build. The separate validation stage depends on
+      # VMR_Vertical_Build, which does not exist under that name in this pipeline.
+      useMicrosoftBuildAssetsForTests: false
+      legs:
+
+      ### Stage 1 legs ###
+
+      - buildNameFormat: 'SB_{0}_Online_MsftSdk'
+        distro: centos
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: true                    # ✅
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+
+      - buildNameFormat: 'SB_{0}_Offline_MsftSdk'
+        distro: ubuntu
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+
+      - buildNameFormat: 'SB_{0}_Offline_MsftSdk'
+        distro: almalinux
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+
+      - buildNameFormat: 'SB_{0}_Offline_MsftSdk'
+        distro: alpine
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+
+      - buildNameFormat: 'SB_{0}_Offline_MsftSdk'
+        distro: fedora
+        targetArchitecture: x64
+        buildFromArchive: true             # ✅
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: true           # ✅
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+        disableBinaryAnalysisCaching: true
+
+      - buildNameFormat: 'SB_{0}Arm64_Offline_MsftSdk'
+        distro: ubuntu
+        targetArchitecture: arm64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+
+      ### Stage 2 legs - each rebuilds from the SDK its stage 1 counterpart produced ###
+      # Every leg reuses artifacts from a leg of its own distro and architecture: source-only
+      # non-cross builds are non-portable, so an SDK built on one distro cannot be relied on to run
+      # on another (a musl SDK on glibc, or vice versa, certainly cannot).
+
+      - buildNameFormat: 'SB_{0}_Offline_CurrentSourceBuiltSdk'
+        distro: centos
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+        reuseBuildArtifactsFrom: 'SB_{0}_Online_MsftSdk_x64'
+
+      - buildNameFormat: 'SB_{0}_Offline_CurrentSourceBuiltSdk'
+        distro: ubuntu
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+        reuseBuildArtifactsFrom: 'SB_{0}_Offline_MsftSdk_x64'
+
+      - buildNameFormat: 'SB_{0}_Offline_CurrentSourceBuiltSdk'
+        distro: almalinux
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+        reuseBuildArtifactsFrom: 'SB_{0}_Offline_MsftSdk_x64'
+
+      - buildNameFormat: 'SB_{0}_Offline_CurrentSourceBuiltSdk'
+        distro: alpine
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+        reuseBuildArtifactsFrom: 'SB_{0}_Offline_MsftSdk_x64'
+
+      - buildNameFormat: 'SB_{0}_Offline_CurrentSourceBuiltSdk'
+        distro: fedora
+        targetArchitecture: x64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+        reuseBuildArtifactsFrom: 'SB_{0}_Offline_MsftSdk_x64'
+
+      - buildNameFormat: 'SB_{0}Arm64_Offline_CurrentSourceBuiltSdk'
+        distro: ubuntu
+        targetArchitecture: arm64
+        buildFromArchive: false            # 🚫
+        enablePoison: false                # 🚫
+        runOnline: false                   # 🚫
+        useMonoRuntime: false              # 🚫
+        useSystemLibraries: false          # 🚫
+        withPreviousSDK: false             # 🚫
+        disableSigning: true               # ✅
+        createSourceArtifact: false        # 🚫
+        # Tests run in the same job as the build here, without the Microsoft artifacts the
+        # separate validation stage would supply, so the tests that need them are filtered out.
+        extraProperties: /p:DotNetSkipTestsRequiringMicrosoftArtifacts=true
+        reuseBuildArtifactsFrom: 'SB_{0}Arm64_Offline_MsftSdk_arm64'

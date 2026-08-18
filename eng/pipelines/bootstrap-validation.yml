@@ -1,0 +1,134 @@
+# Two-stage bootstrap validation for every platform the official build covers.
+#
+# Stage 1 builds every vertical the way the official build does. Stage 2 builds them all again,
+# each leg bootstrapping from the SDK and toolset packages stage 1 produced rather than the
+# last-known-good SDK pinned in global.json. A green stage 2 means the product on this commit can
+# build itself everywhere we ship it.
+#
+# This exists because the only bootstrap coverage the VMR had was the Linux source-build legs in the
+# official build (SB_CentOSStream10_Online_MsftSdk -> SB_CentOSStream10_Offline_CurrentSourceBuiltSdk).
+# A change could break bootstrappability on Windows, macOS, musl or any cross/mobile vertical and CI
+# would stay green.
+#
+# This yml is used by these pipelines:
+# - dotnet-unified-build-bootstrap-validation (internal)
+#
+# Manual only: a run is roughly twice the official build, so it is an on-demand health check rather
+# than per-commit CI.
+
+trigger: none
+pr: none
+
+parameters:
+- name: excludeRuntimeDependentJobs
+  displayName: 'Exclude runtime dependent jobs (non-1xx branches)'
+  type: boolean
+  default: false
+
+- name: includeSourceBuild
+  displayName: 'Include the Linux source-build legs'
+  type: boolean
+  default: true
+
+variables:
+- ${{ if eq(variables['System.TeamProject'], 'public') }}:
+  - name: skipComponentGovernanceDetection  # we run CG on internal builds only
+    value: true
+
+  - name: Codeql.Enabled  # we run CodeQL on internal builds only
+    value: false
+
+- template: /eng/common/templates-official/variables/pool-providers.yml@self
+- template: /eng/pipelines/templates/variables/vmr-build.yml@self
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    settings:
+      networkIsolationPolicy: Permissive, CFSClean, CFSClean2
+    featureFlags:
+      incrementalSDLBinaryAnalysis: true
+    sdl:
+      sourceAnalysisPool:
+        name: $(DncEngInternalBuildPool)
+        image: 1es-windows-2022
+        os: windows
+
+      # Spotbugs is failing the Windows builds: https://github.com/dotnet/dnceng/issues/2740
+      spotBugs:
+        enabled: false
+
+      # This pipeline validates bootstrappability, not compliance. The official build is what runs
+      # the full analysis; doubling it here would double an already expensive run for no signal.
+      codeql:
+        compiled:
+          enabled: false
+
+    containers:
+      ${{ variables.almaLinuxContainerName }}:
+        image: ${{ variables.almaLinuxContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.alpineContainerName }}:
+        image: ${{ variables.alpineContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.centOSStreamContainerName }}:
+        image: ${{ variables.centOSStreamContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.fedoraContainerName }}:
+        image: ${{ variables.fedoraContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.ubuntuContainerName }}:
+        image: ${{ variables.ubuntuContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.ubuntuArmContainerName }}:
+        image: ${{ variables.ubuntuArmContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.azurelinuxBuildContainerName }}:
+        image: ${{ variables.azurelinuxBuildContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.azurelinuxX64CrossContainerName }}:
+        image: ${{ variables.azurelinuxX64CrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.azurelinuxArmCrossContainerName }}:
+        image: ${{ variables.azurelinuxArmCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.azurelinuxArm64CrossContainerName }}:
+        image: ${{ variables.azurelinuxArm64CrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.azurelinuxX64MuslCrossContainerName }}:
+        image: ${{ variables.azurelinuxX64MuslCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.azurelinuxArmMuslCrossContainerName }}:
+        image: ${{ variables.azurelinuxArmMuslCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.azurelinuxArm64MuslCrossContainerName }}:
+        image: ${{ variables.azurelinuxArm64MuslCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.androidCrossContainerName }}:
+        image: ${{ variables.androidCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.linuxBionicCrossContainerName }}:
+        image: ${{ variables.linuxBionicCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.browserCrossContainerName }}:
+        image: ${{ variables.browserCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+      ${{ variables.wasiCrossContainerName }}:
+        image: ${{ variables.wasiCrossContainerImage }}
+        options: ${{ variables.defaultContainerOptions }}
+
+    stages:
+    - template: /eng/pipelines/templates/stages/vmr-bootstrap-validation.yml@self
+      parameters:
+        # Unsigned throughout: signing adds hours and MicroBuild/ESRP dependencies without telling
+        # us anything about whether the product can build itself.
+        desiredSigning: Unsigned
+        excludeRuntimeDependentJobs: ${{ parameters.excludeRuntimeDependentJobs }}
+        includeSourceBuild: ${{ parameters.includeSourceBuild }}

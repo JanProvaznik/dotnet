@@ -5,23 +5,8 @@
 
 set -euo pipefail
 
-# Rewrites the SDK version entries of a global.json in place. Both the "sdk"/"version" and the
-# "tools"/"dotnet" entries hold the version of the SDK used to build and are read during the build:
-# the MSBuild SDK resolver uses the former, Arcade's tools.sh the latter. Each substitution is scoped
-# to the object that owns the key so that unrelated entries elsewhere in the file are left alone.
-# Written with sed rather than jq because jq isn't guaranteed to be present on the build images, and
-# via a temporary file because the -i flag isn't portable across GNU and BSD sed.
-function update_global_json_sdk_version() {
-  local global_json_file="$1"
-  local sdk_version="$2"
-  local tmp_file="${global_json_file}.tmp"
-
-  sed -E \
-    -e "/\"sdk\"[[:space:]]*:/,/\}/ s|(\"version\"[[:space:]]*:[[:space:]]*\")[^\"]*\"|\1${sdk_version}\"|" \
-    -e "/\"tools\"[[:space:]]*:/,/\}/ s|(\"dotnet\"[[:space:]]*:[[:space:]]*\")[^\"]*\"|\1${sdk_version}\"|" \
-    "$global_json_file" > "$tmp_file"
-  mv "$tmp_file" "$global_json_file"
-}
+# update_global_json_sdk_version and friends are shared with the Microsoft build's toolset init.
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/toolset-init-common.sh"
 
 function source_only_toolset_init() {
   local custom_sdk_dir="$1"

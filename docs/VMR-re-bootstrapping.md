@@ -27,6 +27,14 @@ of when re-bootstrapping is allowed, means that repos should, in general, wait
 to take a dependency on a new toolset feature until after that feature has been
 released.
 
+## Checking that a re-bootstrap will succeed
+
+A re-bootstrap only works if the product can build itself. The [bootstrap
+validation pipeline](VMR-Bootstrap-Validation.md) builds the whole product twice
+in one run, the second time using the toolset the first build produced, on every
+platform the official build covers. Running it before a planned re-bootstrap
+surfaces breaks that ordinary CI cannot see.
+
 ## Steps to re-bootstrap
 
 > [!IMPORTANT]

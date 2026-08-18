@@ -29,6 +29,11 @@ Param(
   [switch]$prepareMachine,
   [string]$projects,
   [bool] $warnAsError = $true,
+
+  # Bootstrap settings
+  [string]$withSdk,
+  [string]$withPackages,
+
   [Parameter(ValueFromRemainingArguments=$true)][String[]]$properties
 )
 
@@ -68,14 +73,37 @@ function Get-Usage() {
   Write-Host "  -projects <value>           Project or solution file to build"
   Write-Host "  -warnAsError <value>        Sets warnaserror msbuild parameter ('true' or 'false')"
   Write-Host ""
-}
 
-. $PSScriptRoot\common\tools.ps1
+  Write-Host "Bootstrap settings:"
+  Write-Host "  -withSdk <DIR>              Use the SDK in the specified directory for bootstrapping"
+  Write-Host "  -withPackages <DIR>         Use the specified directory of previously-built packages"
+  Write-Host ""
+}
 
 if ($help) {
   Get-Usage
   exit 0
 }
+
+# This has to happen before tools.ps1 is dot-sourced: that script caches global.json into
+# $GlobalJson when it loads, and InitializeDotNetCli compares $GlobalJson.tools.dotnet against
+# DOTNET_INSTALL_DIR to decide whether it needs to install an SDK.
+. $PSScriptRoot\msft-toolset-init.ps1
+
+$bootstrapProperties = @()
+if ($withSdk -or $withPackages) {
+  try {
+    $bootstrapProperties = Initialize-MsftToolset (Resolve-Path "$PSScriptRoot\..").Path $withSdk $withPackages
+  }
+  catch {
+    # tools.ps1 isn't loaded yet, so Write-PipelineTelemetryError isn't available here.
+    Write-Host "##vso[task.logissue type=error]Bootstrap toolset initialization failed: $($_.Exception.Message)"
+    Write-Host $_.ScriptStackTrace
+    exit 1
+  }
+}
+
+. $PSScriptRoot\common\tools.ps1
 
 $actions = @("/p:Restore=true", "/p:Build=true", "/p:Publish=true")
 
@@ -100,6 +128,7 @@ if ($officialBuildId) { $arguments += "/p:OfficialBuildId=$officialBuildId" }
 # Flow the explicit choices down to the individual repo builds as well.
 if ($PSBoundParameters.ContainsKey('msbuildMultiThreaded')) { $arguments += "/p:DotNetBuildMT=$msbuildMultiThreaded" }
 if ($PSBoundParameters.ContainsKey('nodeReuse')) { $arguments += "/p:DotNetBuildNodeReuse=$nodeReuse" }
+$arguments += $bootstrapProperties
 
 function Build {
   $toolsetBuildProj = InitializeToolset

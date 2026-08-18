@@ -266,11 +266,26 @@ jobs:
   - name: previouslySourceBuiltArtifactsDir
     value: $(Agent.TempDirectory)/previously-source-built-artifacts
 
+  # Bootstrap validation staging locations (see ../steps/bootstrap-toolset.yml)
+  - name: bootstrapDownloadDir
+    value: $(Agent.TempDirectory)/bootstrap-download
+  - name: bootstrapPackagesDownloadDir
+    value: $(Agent.TempDirectory)/bootstrap-packages-download
+  - name: bootstrapSdkDir
+    value: $(Agent.TempDirectory)/bootstrap-sdk
+  - name: bootstrapPackagesDir
+    value: $(Agent.TempDirectory)/bootstrap-packages
+
   - name: successfulJobArtifactName
-    value: $(Agent.JobName)_Artifacts
+    value: $(artifactNamePrefix)$(Agent.JobName)_Artifacts
 
   - name: failedJobArtifactName
     value: $(successfulJobArtifactName)_Attempt$(System.JobAttempt)
+
+  # Set at runtime by the bootstrap steps below when this job rebuilds from a previous stage's
+  # toolset. Empty for every other build.
+  - name: bootstrapArguments
+    value: ''
 
   - ${{ if eq(parameters.disableComponentGovernance, true) }}:
     - name: ONEES_ENFORCED_COMPONENTGOVERNANCE_ENABLED
@@ -329,7 +344,7 @@ jobs:
     value: $(commandPrefix)ci $(cleanArgument) $(commandPrefix)prepareMachine -c ${{ parameters.configuration }} $(brandingArgument) $(useSystemLibrariesArgument) $(officialBuildArgument)
 
   - name: baseProperties
-    value: $(officialBuildProperties) /p:VerticalName=$(Agent.JobName)
+    value: $(officialBuildProperties) /p:VerticalName=$(artifactNamePrefix)$(Agent.JobName)
 
   - name: targetProperties
     ${{ if and(ne(parameters.targetOS, ''), ne(parameters.targetArchitecture, '')) }}:
@@ -405,7 +420,7 @@ jobs:
       displayName: Publish BuildLogs
       condition: succeededOrFailed()
       targetPath: $(Build.ArtifactStagingDirectory)/BuildLogs
-      artifactName: $(Agent.JobName)_BuildLogs_Attempt$(System.JobAttempt)
+      artifactName: $(artifactNamePrefix)$(Agent.JobName)_BuildLogs_Attempt$(System.JobAttempt)
       sbomEnabled: false
 
     # Both publishing steps are necessary to ensure artifacts are published on both success and failure.
@@ -429,7 +444,7 @@ jobs:
     # Using build artifacts to enable publishing the vertical manifests to a single artifact from different jobs
     - ${{ if ne(parameters.buildSourceOnly, true) }}:
       - output: buildArtifacts
-        PathtoPublish: $(Build.ArtifactStagingDirectory)/artifacts/manifests/${{ parameters.configuration }}/$(Agent.JobName).xml
+        PathtoPublish: $(Build.ArtifactStagingDirectory)/artifacts/manifests/${{ parameters.configuration }}/$(artifactNamePrefix)$(Agent.JobName).xml
         ArtifactName: VerticalManifests
         displayName: Publish Vertical Manifest
         sbomEnabled: false
@@ -505,9 +520,44 @@ jobs:
       - ${{ else }}:
         - task: DownloadPipelineArtifact@2
           inputs:
-            artifactName: ${{ reuseBuildArtifacts }}_Artifacts
+            # Prefixed so that inside the bootstrap validation pipeline's second stage the
+            # build-pass 2/3 join points consume that stage's own outputs rather than the first
+            # stage's. Empty everywhere else.
+            artifactName: $(artifactNamePrefix)${{ reuseBuildArtifacts }}_Artifacts
             targetPath: $(sourcesPath)/artifacts/
           displayName: Download Previous Build (${{ reuseBuildArtifacts }})
+
+  # Bootstrap validation: rebuild using the SDK and toolset packages produced by the first stage of
+  # this run. This is the Microsoft-build counterpart of the source-build stage 2 legs above, which
+  # get their toolset through reuseBuildArtifactsFrom instead.
+  #
+  # The toolset always comes from the vertical matching this leg's *host* platform, not its target:
+  # short-stack legs (android, ios, browser, wasi, ...) never build an SDK at all, and cross-built
+  # legs (windows-arm64, linux-arm64, linux-musl-*) produce an SDK that cannot run on the agent.
+  - ${{ if ne(parameters.buildSourceOnly, true) }}:
+    - ${{ if eq(parameters.pool.os, 'windows') }}:
+      - template: ../steps/bootstrap-toolset.yml
+        parameters:
+          hostVertical: Windows_x64
+          packagesVertical: Windows_x64
+          archiveExtension: .zip
+          isWindows: true
+    - ${{ elseif eq(parameters.pool.os, 'macOS') }}:
+      - template: ../steps/bootstrap-toolset.yml
+        parameters:
+          hostVertical: OSX_arm64
+          # The macOS verticals don't publish Arcade's packages, so take them from Linux_x64. They
+          # are platform-agnostic .nupkg files built from the same commit in the same run.
+          packagesVertical: Linux_x64
+          archiveExtension: .tar.gz
+          isWindows: false
+    - ${{ else }}:
+      - template: ../steps/bootstrap-toolset.yml
+        parameters:
+          hostVertical: Linux_x64
+          packagesVertical: Linux_x64
+          archiveExtension: .tar.gz
+          isWindows: false
 
   - ${{ if eq(parameters.withPreviousSDK, 'true') }}:
     - script: |
@@ -649,6 +699,7 @@ jobs:
         $(buildPassProperties)
         $(runtimeSourceFeedKeyProperties)
         $(_SignDiagnosticFilesArgs)
+        $(bootstrapArguments)
         ${{ parameters.extraProperties }}
       displayName: Build
       workingDirectory: ${{ variables.sourcesPath }}
@@ -666,6 +717,7 @@ jobs:
           $(baseArguments)
           $(targetProperties)
           $(buildPassProperties)
+          $(bootstrapArguments)
           ${{ parameters.extraProperties }}
           -test
           -excludeCIBinarylog
@@ -870,7 +922,7 @@ jobs:
             fi
           fi
 
-          buildArgs="$(additionalBuildArgs) $customBuildArgs $extraBuildProperties"
+          buildArgs="$(additionalBuildArgs) $(bootstrapArguments) $customBuildArgs $extraBuildProperties"
 
           if [[ -n "$customEnvVars" ]]; then
             for envVar in $customEnvVars; do
@@ -944,7 +996,7 @@ jobs:
             customBuildArgs="$customBuildArgs --target-rid ${{ parameters.targetRid }}"
           fi
 
-          buildArgs="$(additionalBuildArgs) $customBuildArgs $extraBuildProperties"
+          buildArgs="$(additionalBuildArgs) $(bootstrapArguments) $customBuildArgs $extraBuildProperties"
           buildArgs=$(echo $buildArgs | xargs) # Remove extra spaces
 
           cd $(sourcesPath)
@@ -1046,7 +1098,7 @@ jobs:
 
   - ${{ if or(ne(variables['System.TeamProject'], 'internal'), eq(variables['Build.Reason'], 'PullRequest')) }}:
     - publish: $(Build.ArtifactStagingDirectory)/BuildLogs
-      artifact: $(Agent.JobName)_BuildLogs_Attempt$(System.JobAttempt)
+      artifact: $(artifactNamePrefix)$(Agent.JobName)_BuildLogs_Attempt$(System.JobAttempt)
       displayName: Publish BuildLogs
       continueOnError: true
       condition: always()
@@ -1097,6 +1149,6 @@ jobs:
     - ${{ if ne(parameters.buildSourceOnly, true) }}:
       - task: PublishBuildArtifacts@1
         inputs:
-          PathtoPublish: $(Build.ArtifactStagingDirectory)/artifacts/manifests/${{ parameters.configuration }}/$(Agent.JobName).xml
+          PathtoPublish: $(Build.ArtifactStagingDirectory)/artifacts/manifests/${{ parameters.configuration }}/$(artifactNamePrefix)$(Agent.JobName).xml
           ArtifactName: VerticalManifests
         displayName: Publish Vertical Manifest

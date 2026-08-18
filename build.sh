@@ -41,10 +41,13 @@ usage()
   echo "  --release-manifest <FILE>         A JSON file, an alternative source of Source Link metadata"
   echo "  --source-repository <URL>         Source Link repository URL, required when building from tarball"
   echo "  --source-version <SHA>            Source Link revision, required when building from tarball"
-  echo "  --with-packages <DIR>             Use the specified directory of previously-built packages"
   echo "  --with-shared-components <DIR>    Use the specified shared components artifacts (e.g. from a build of a 1xx branch)"
-  echo "  --with-sdk <DIR>                  Use the SDK in the specified directory for bootstrapping"
   echo "  --prep                            Run prep-source-build.sh to download bootstrap binaries before building"
+  echo ""
+
+  echo "Bootstrap settings (apply to both Microsoft and source-only builds):"
+  echo "  --with-sdk <DIR>                  Use the SDK in the specified directory for bootstrapping"
+  echo "  --with-packages <DIR>             Use the specified directory of previously-built packages"
   echo ""
 
   echo "Advanced settings:"
@@ -306,6 +309,7 @@ node_reuse_explicit=$node_reuse
 
 source "$scriptroot/eng/common/tools.sh"
 source "$scriptroot/eng/source-build-toolset-init.sh"
+source "$scriptroot/eng/msft-toolset-init.sh"
 
 # Flow the explicit choices down to the individual repo builds as well.
 if [[ -n "$msbuild_multi_threaded_explicit" ]]; then
@@ -462,6 +466,11 @@ if [[ "$sourceOnly" == "true" ]]; then
 
   # Initialize source-only toolset (includes custom SDK setup, MSBuild resolver, and source-built resolver)
   source_only_toolset_init "$customSdkDir" "$customPackagesDir" "$binary_log" "$test" "${properties[@]}"
+elif [[ -n "$customSdkDir" || -n "$customPackagesDir" ]]; then
+  # Microsoft build bootstrapping from an externally supplied toolset, e.g. the second stage of the
+  # bootstrap validation pipeline rebuilding with the SDK and packages the first stage produced.
+  # This appends to the properties array, so it has to run before Build.
+  msft_toolset_init "$customSdkDir" "$customPackagesDir"
 fi
 
 Build
