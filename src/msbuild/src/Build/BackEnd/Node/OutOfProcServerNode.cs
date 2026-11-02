@@ -30,6 +30,20 @@ namespace Microsoft.Build.Experimental
         private readonly BuildCallback _buildFunction;
 
         /// <summary>
+        /// Backing field for <see cref="CurrentBuildShutsDownServerNode"/>.
+        /// </summary>
+        private static bool s_currentBuildShutsDownServerNode;
+
+        /// <summary>
+        /// Whether the build currently being served by this server node will tear the node down afterward
+        /// instead of leaving it resident for reuse (a "short-lived" server — a <c>/mt</c> build with node reuse
+        /// off). Only meaningful from within a server build callback; written and read on the same build thread,
+        /// so no synchronization is needed. Public because MSBuild.exe reads it and Microsoft.Build exposes no
+        /// InternalsVisibleTo to it.
+        /// </summary>
+        public static bool CurrentBuildShutsDownServerNode => s_currentBuildShutsDownServerNode;
+
+        /// <summary>
         /// The endpoint used to talk to the host.
         /// </summary>
         private INodeEndpoint _nodeEndpoint = default!;
@@ -70,9 +84,31 @@ namespace Microsoft.Build.Experimental
         private bool _cancelRequested = false;
         private string _serverBusyMutexName = default!;
 
+        /// <summary>
+        /// Identifies this transient server, or <see langword="null"/> when this is the resident
+        /// server. Supplied by the client that launched this process, which derives the same pipe and
+        /// mutex names from it.
+        /// </summary>
+        private readonly string? _instanceId;
+
+        /// <summary>
+        /// Creates a resident MSBuild server node.
+        /// </summary>
+        /// <param name="buildFunction">The callback used to execute a build.</param>
         public OutOfProcServerNode(BuildCallback buildFunction)
+            : this(buildFunction, instanceId: null)
+        {
+        }
+
+        /// <summary>
+        /// Creates an MSBuild server node with the specified transient identity.
+        /// </summary>
+        /// <param name="buildFunction">The callback used to execute a build.</param>
+        /// <param name="instanceId">The transient server identity, or null for a resident server.</param>
+        public OutOfProcServerNode(BuildCallback buildFunction, string? instanceId)
         {
             _buildFunction = buildFunction;
+            _instanceId = instanceId;
 
             _receivedPackets = new ConcurrentQueue<INodePacket>();
             _packetReceivedEvent = new AutoResetEvent(false);
@@ -94,7 +130,8 @@ namespace Microsoft.Build.Experimental
         public NodeEngineShutdownReason Run(out Exception? shutdownException)
         {
             ServerNodeHandshake handshake = new(
-                CommunicationsUtilities.GetHandshakeOptions(taskHost: false, taskHostParameters: TaskHostParameters.Empty, architectureFlagToSet: XMakeAttributes.GetCurrentMSBuildArchitecture()));
+                CommunicationsUtilities.GetHandshakeOptions(taskHost: false, taskHostParameters: TaskHostParameters.Empty, architectureFlagToSet: XMakeAttributes.GetCurrentMSBuildArchitecture()),
+                _instanceId);
 
             _serverBusyMutexName = GetBusyServerMutexName(handshake);
 
@@ -107,13 +144,6 @@ namespace Microsoft.Build.Experimental
                 shutdownException = new InvalidOperationException("MSBuild server is already running!");
                 return NodeEngineShutdownReason.Error;
             }
-
-            // Mark the process as a long-lived host so per-build BuildParameters instances
-            // inherit IsLongLivedHost = true. This drives the workaround that routes tasks
-            // whose static state would leak across invocations (e.g., NuGet RestoreTask) to
-            // a transient TaskHost instead of a reusable sidecar.
-            // See https://github.com/dotnet/msbuild/issues/13315.
-            BuildParameters.MarkProcessAsLongLivedHost();
 
             while (true)
             {
@@ -169,6 +199,13 @@ namespace Microsoft.Build.Experimental
         }
 
         #endregion
+
+        /// <summary>
+        /// The command line switch a client uses to tell the transient server it launches which
+        /// instance it is. Both sides fold the value into <see cref="ServerNodeHandshake.ComputeHash"/>,
+        /// so a transient server is addressable only by that client.
+        /// </summary>
+        internal const string ServerInstanceIdCommandLineSwitch = "/serverinstanceid:";
 
         internal static string GetPipeName(ServerNodeHandshake handshake)
             => NamedPipeUtil.GetPlatformSpecificPipeName($"MSBuildServer-{handshake.ComputeHash()}");
@@ -326,7 +363,8 @@ namespace Microsoft.Build.Experimental
         /// <param name="buildComplete"></param>
         private void HandleServerShutdownCommand(NodeBuildComplete buildComplete)
         {
-            bool shouldReuse = buildComplete.PrepareForReuse;
+            // A transient server is private to one build and must never enter the resident reuse loop.
+            bool shouldReuse = buildComplete.PrepareForReuse && _instanceId is null;
 
             if (shouldReuse)
             {
@@ -388,7 +426,6 @@ namespace Microsoft.Build.Experimental
             Directory.SetCurrentDirectory(command.StartupDirectory);
 
             CommunicationsUtilities.SetEnvironment(command.BuildProcessEnvironment);
-
             Traits.UpdateFromEnvironment();
 
             Thread.CurrentThread.CurrentCulture = command.Culture;
@@ -452,6 +489,9 @@ namespace Microsoft.Build.Experimental
                     Console.SetOut(outWriter);
                     Console.SetError(errWriter);
 
+                    // Publish whether this build's server is short-lived so the build callback can report it.
+                    s_currentBuildShutsDownServerNode = command.ShutdownAfterBuild;
+
                     buildResult = _buildFunction(command.CommandLine);
                 }
             }
@@ -472,8 +512,8 @@ namespace Microsoft.Build.Experimental
             var response = new ServerNodeBuildResult(buildResult.exitCode, buildResult.exitType);
             SendPacket(response);
 
-            // Shutdown server if cancel was requested. This is consistent with nodes behavior.
-            _shutdownReason = _cancelRequested ? NodeEngineShutdownReason.BuildComplete : NodeEngineShutdownReason.BuildCompleteReuse;
+            // Shutdown server after this build if a cancel was requested, or if the client asked for no reuse. This is consistent with nodes behavior.
+            _shutdownReason = (_cancelRequested || command.ShutdownAfterBuild) ? NodeEngineShutdownReason.BuildComplete : NodeEngineShutdownReason.BuildCompleteReuse;
             _shutdownEvent.Set();
         }
 

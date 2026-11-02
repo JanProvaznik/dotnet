@@ -55,8 +55,8 @@ namespace Microsoft.Build.Tasks
         public string Namespaces { get; set; }
 
         /// <summary>
-        /// Set to true to prohibit loading XML with embedded DTD and produce error MSB3733
-        /// if DTD is present. This was a pre-v15 behavior. By default, a DTD clause if any is ignored.
+        /// Prohibits loading XML with embedded DTD. When true, an error is raised if a DTD is present.
+        /// By default, DTDs are ignored to preserve existing build behavior.
         /// </summary>
         public bool ProhibitDtd { get; set; }
 
@@ -91,7 +91,15 @@ namespace Microsoft.Build.Tasks
             }
             catch (Exception e) when (!ExceptionHandling.IsCriticalException(e))
             {
-                Log.LogErrorWithCodeFromResources("XmlPeekPoke.InputFileError", XmlInputPath.ItemSpec, e.Message);
+                if (XmlTaskUtility.IsDtdProhibitedException(e, ProhibitDtd, xmlinput.ContainsDtd))
+                {
+                    Log.LogErrorWithCodeFromResources("XmlPeekPoke.InputDtdProhibited", nameof(ProhibitDtd), nameof(XmlPeek));
+                }
+                else
+                {
+                    Log.LogErrorWithCodeFromResources("XmlPeekPoke.InputFileError", XmlInputPath?.ItemSpec, e.Message);
+                }
+
                 return false;
             }
             finally
@@ -304,6 +312,15 @@ namespace Microsoft.Build.Tasks
                 {
                     return XmlReader.Create(new StringReader(_xmlContent), settings: settings);
                 }
+            }
+
+            public bool ContainsDtd()
+            {
+                if (XmlMode == XmlModes.XmlFile)
+                {
+                    return XmlTaskUtility.ContainsDtd(_filePath.Value);
+                }
+                return XmlTaskUtility.ContainsDtd(_xmlContent);
             }
 
             /// <summary>

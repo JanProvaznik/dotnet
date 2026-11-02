@@ -10,6 +10,12 @@ The opt-out comes in the form of setting the environment variable `MSBUILDDISABL
 
 The opt-out should be just a *temporary* workaround for a problem - as the feature will anyways become permanent eventually. For this reason - **please make sure to create or upvote a bug describing the issue making you opt-out**.
 
+### Change waves and reused processes
+
+`MSBUILDDISABLEFEATURESFROMVERSION` is read once per process, so a process that outlives a single build - a reused worker node or an MSBuild Server node - keeps the change wave it started with. To make sure every process taking part in a build agrees on the change wave, the resolved change wave is part of the node handshake: a node that resolved a different change wave refuses the connection and MSBuild starts a fresh one instead. Changing `MSBUILDDISABLEFEATURESFROMVERSION` between builds therefore starts new nodes rather than reusing the existing ones. Values that resolve to the same change wave (for example an unset variable and a value in an invalid format) still allow node reuse.
+
+Task hosts are deliberately left out of this. A task host connection can span two different MSBuild versions - most notably the .NET task host, where a .NET Framework parent such as Visual Studio talks to a child taken from the installed .NET SDK - and the resolved change wave is version-relative, because the environment variable is clamped and rounded into the wave list of whichever binary reads it. Two versions can therefore resolve the same variable to different waves. Unlike a worker node, a task host that fails the handshake cannot be replaced by a compatible one, since the parent can only relaunch the very same executable, so the build would fail with MSB4216. A task host consequently keeps the change wave it started with even across builds.
+
 ## When do they become permanent?
 
 A wave of features is eligible to "rotate out" (i.e. become standard functionality) six months after its release. For example, wave 16.8 stayed opt-out through wave 16.10, becoming standard functionality when wave 17.0 is introduced.
@@ -28,6 +34,18 @@ Change wave checks around features will be removed in the release that accompani
 # Change Waves & Associated Features
 
 ## Current Rotation of Change Waves
+
+### 18.11
+- [XmlPeek, XmlPoke, and XslTransformation support prohibiting embedded DTDs](https://github.com/dotnet/msbuild/pull/14285). On the .NET 10 servicing branch, set `ProhibitDtd="true"` to opt in; the existing default of ignoring DTDs is preserved.
+- [Out-of-proc communication uses larger read-ahead buffers and pre-buffers TaskHost packet bodies to reduce pipe reads.](https://github.com/dotnet/msbuild/pull/14505)
+- [Restore no longer discards a ProjectRootElementCache that reloads changed files from disk, so the build that follows an implicit restore does not re-parse the import closure.](https://github.com/dotnet/msbuild/pull/14558)
+- [Use optimized MSBuild file specification matching and enumeration](https://github.com/dotnet/msbuild/pull/14663). Regex-backed file globs use culture-invariant case folding; set `MSBUILDUSELEGACYCULTURESENSITIVEFILEGLOBS=1` to preserve legacy current-culture folding without disabling other Wave 18.11 features.
+
+### 18.10
+- [Resolve relative project paths against the Unix logical current directory from `PWD`, so builds under symlinked directories produce stable project full paths and related output paths.](https://github.com/dotnet/msbuild/pull/13752)
+- [Restore passes ExcludeRestorePackageImports=true as a global property so NuGet's restore no longer triggers a second evaluation of every project.](https://github.com/dotnet/msbuild/issues/14273)
+- [`-getProperty`/`-getItem` (without a target) stop evaluation after the pass that produces the requested data instead of running a full evaluation, avoiding later passes such as target registration.](https://github.com/dotnet/msbuild/pull/14290)
+
 
 ### 18.9
 - [GenerateResource: typed ResX data/metadata entries in Mark-of-the-Web files are now treated as untrusted and blocked with MSB3821; unblock the file (or set MSBUILDDISABLEFEATURESFROMVERSION=18.9) to restore prior behavior. ResXFileRef entries are always blocked regardless of this wave.](https://github.com/dotnet/msbuild/pull/14015)
