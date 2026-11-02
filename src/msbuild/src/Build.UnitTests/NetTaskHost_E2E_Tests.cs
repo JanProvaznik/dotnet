@@ -11,6 +11,7 @@ using Microsoft.Build.UnitTests;
 using Microsoft.Build.UnitTests.Shared;
 using Shouldly;
 using Xunit;
+using Task = System.Threading.Tasks.Task;
 
 namespace Microsoft.Build.Engine.UnitTests
 {
@@ -25,6 +26,73 @@ namespace Microsoft.Build.Engine.UnitTests
         public NetTaskHost_E2E_Tests(ITestOutputHelper output)
         {
             _output = output;
+        }
+
+        [Fact]
+        public async Task LegacyApisRemainUsableByTrimAnalyzedConsumer()
+        {
+            using TestEnvironment env = TestEnvironment.Create(_output);
+            var outputDirectory = env.CreateFolder();
+            Microsoft.Build.Utilities.CommandLineBuilder command = new();
+            command.AppendFileNameIfNotNull(Path.Combine(TestAssetsRootPath, "LegacyTrimConsumer", "LegacyTrimConsumer.csproj"));
+            command.AppendSwitch("-restore");
+            command.AppendSwitch("-v:q");
+            command.AppendSwitchIfNotNull("-p:BaseIntermediateOutputPath=", FileUtilities.EnsureTrailingSlash(Path.Combine(outputDirectory.Path, "obj")));
+            command.AppendSwitchIfNotNull("-p:OutputPath=", FileUtilities.EnsureTrailingSlash(Path.Combine(outputDirectory.Path, "bin")));
+            command.AppendSwitch("-p:ImportDirectoryBuildProps=false");
+            command.AppendSwitch("-p:ImportDirectoryBuildTargets=false");
+            command.AppendSwitch("-p:ImportDirectoryPackagesProps=false");
+            var (succeeded, output) = await RunnerUtilities.ExecBootstrappedMSBuildAsync(
+                command.ToString(), outputHelper: _output, timeoutMilliseconds: 120_000);
+
+            succeeded.ShouldBeTrue(output);
+        }
+
+        [Theory]
+        [InlineData("AssemblyTaskFactory", false)]
+        [InlineData("TaskHostFactory", false)]
+        [InlineData("AssemblyTaskFactory", true)]
+        public async Task TypedTaskInputsPreservePathsAndMetadata(string taskFactory, bool multiThreaded)
+        {
+            using TestEnvironment env = TestEnvironment.Create(_output);
+            var taskOutput = env.CreateFolder();
+            string assetPath = Path.Combine(TestAssetsRootPath, "TypedTaskInputs");
+#if NET
+            string taskFramework = RunnerUtilities.LatestDotNetCoreForMSBuild;
+#else
+            string taskFramework = "net472";
+#endif
+            Microsoft.Build.Utilities.CommandLineBuilder buildCommand = new();
+            buildCommand.AppendFileNameIfNotNull(Path.Combine(assetPath, "TypedTaskInputs.csproj"));
+            buildCommand.AppendSwitch("-restore");
+            buildCommand.AppendSwitch("-v:q");
+            buildCommand.AppendSwitchIfNotNull("-p:TaskTargetFramework=", taskFramework);
+            buildCommand.AppendSwitchIfNotNull("-p:BaseIntermediateOutputPath=", FileUtilities.EnsureTrailingSlash(Path.Combine(taskOutput.Path, "obj")));
+            buildCommand.AppendSwitchIfNotNull("-p:OutputPath=", FileUtilities.EnsureTrailingSlash(Path.Combine(taskOutput.Path, "bin")));
+            buildCommand.AppendSwitch("-p:AppendTargetFrameworkToOutputPath=false");
+            buildCommand.AppendSwitch("-p:ImportDirectoryBuildProps=false");
+            buildCommand.AppendSwitch("-p:ImportDirectoryBuildTargets=false");
+            buildCommand.AppendSwitch("-p:ImportDirectoryPackagesProps=false");
+            var (buildSucceeded, buildOutput) = await RunnerUtilities.ExecBootstrappedMSBuildAsync(
+                buildCommand.ToString(), outputHelper: _output, timeoutMilliseconds: 120_000);
+            buildSucceeded.ShouldBeTrue(buildOutput);
+
+            string taskAssembly = Path.Combine(taskOutput.Path, "bin", "TypedTaskInputs.dll");
+            Microsoft.Build.Utilities.CommandLineBuilder runCommand = new();
+            runCommand.AppendFileNameIfNotNull(Path.Combine(assetPath, "TypedTaskInputs.proj"));
+            runCommand.AppendSwitch("-v:n");
+            runCommand.AppendSwitchIfNotNull("-p:TaskAssembly=", taskAssembly);
+            runCommand.AppendSwitchIfNotNull("-p:TaskFactoryToUse=", taskFactory);
+            if (multiThreaded)
+            {
+                runCommand.AppendSwitch("-mt");
+            }
+
+            var (succeeded, output) = await RunnerUtilities.ExecBootstrappedMSBuildAsync(
+                runCommand.ToString(), outputHelper: _output, timeoutMilliseconds: 120_000);
+
+            succeeded.ShouldBeTrue(output);
+            output.ShouldContain("TypedInputContractVerified=True");
         }
 
         [WindowsFullFrameworkOnlyFact]

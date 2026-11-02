@@ -3,13 +3,11 @@
 
 using System;
 using System.Collections;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
-using System.Linq.Expressions;
 using System.Reflection;
 #if NET
 using System.Runtime.CompilerServices;
@@ -912,47 +910,6 @@ namespace Microsoft.Build.BackEnd
         #region Local Methods
 
         /// <summary>
-        /// Cache of compiled constructor delegates that wrap an <see cref="ITaskItem"/> into a
-        /// <see cref="TaskItem{T}"/>, keyed by the generic argument T. Building the closed generic type and
-        /// resolving the constructor via reflection on every parameter binding is expensive, so the delegate
-        /// is compiled once per T and reused.
-        /// </summary>
-        private static readonly ConcurrentDictionary<Type, Func<ITaskItem, ITaskItem>> s_taskItemOfTFactories = new();
-
-        /// <summary>
-        /// Wraps the given <paramref name="item"/> into a <c>TaskItem&lt;T&gt;</c> where T is
-        /// <paramref name="genericArgument"/>, using a cached compiled constructor delegate.
-        /// </summary>
-        private static ITaskItem CreateTaskItemOfT(Type genericArgument, ITaskItem item)
-        {
-            Func<ITaskItem, ITaskItem> factory = s_taskItemOfTFactories.GetOrAdd(genericArgument, static t =>
-            {
-#if NET
-                if (!RuntimeFeature.IsDynamicCodeSupported)
-                {
-                    // Wrapping an ITaskItem into a closed-generic TaskItem<T> requires Type.MakeGenericType
-                    // plus an expression-tree Compile(), both of which need runtime code generation. Fail
-                    // observably under trimming / Native AOT rather than silently mis-binding the typed task
-                    // parameter. (See documentation/aot/follow-up-work.md - the typed TaskItem<T> parameter
-                    // feature still needs a proper AOT-safe binding strategy.)
-                    throw new NotSupportedException(
-                        "Task parameters typed as TaskItem<T> or ITaskItem<T> require runtime code generation " +
-                        "(Type.MakeGenericType and expression compilation) and are not supported when MSBuild " +
-                        "runs trimmed or with Native AOT.");
-                }
-#endif
-                ConstructorInfo constructor = typeof(TaskItem<>).MakeGenericType(t).GetConstructor([typeof(ITaskItem)]);
-                ParameterExpression itemParameter = Expression.Parameter(typeof(ITaskItem), "item");
-                return Expression.Lambda<Func<ITaskItem, ITaskItem>>(
-                    Expression.Convert(Expression.New(constructor, itemParameter), typeof(ITaskItem)),
-                    itemParameter).Compile();
-            });
-
-            return factory(item);
-        }
-
-
-        /// <summary>
         /// Called on the local side.
         /// </summary>
         private bool SetTaskItemParameter(TaskPropertyInfo parameter, ITaskItem item)
@@ -1035,7 +992,7 @@ namespace Microsoft.Build.BackEnd
                         TaskItem item = taskItems[i];
                         currentItem = item;
                         RecordItemForDisconnectIfNecessary(item);
-                        ITaskItem taskItemOfT = CreateTaskItemOfT(taskItemValueType, item);
+                        ITaskItem taskItemOfT = TaskParameterValueConverter.CreateTaskItemOfT(taskItemValueType, item);
                         finalInputs.SetValue(taskItemOfT, i);
                     }
 
@@ -1192,7 +1149,6 @@ namespace Microsoft.Build.BackEnd
         /// If the set of task identity parameters are defined, only tasks that match that identity are chosen.
         /// </summary>
         /// <returns>The Type of the task, or null if it was not found.</returns>
-        [RequiresUnreferencedCode("Creates and loads a task factory by reflecting over an assembly discovered at runtime, which is incompatible with trimming.")]
         private TaskFactoryWrapper FindTaskInRegistry(in TaskHostParameters taskIdentityParameters)
         {
             if (!_intrinsicTasks.TryGetValue(_taskName, out TaskFactoryWrapper returnClass))
@@ -1255,7 +1211,6 @@ namespace Microsoft.Build.BackEnd
         /// <summary>
         /// Instantiates the task.
         /// </summary>
-        [RequiresUnreferencedCode("Instantiates a task by reflecting over a task type discovered at runtime, which is incompatible with trimming.")]
         private ITask InstantiateTask(int scheduledNodeId, in TaskHostParameters taskIdentityParameters)
         {
             ITask task = null;
@@ -1525,7 +1480,6 @@ namespace Microsoft.Build.BackEnd
         /// Re-resolves a <c>MetadataLoadContext</c>-loaded parameter type into the live runtime by its
         /// assembly-qualified name.
         /// </summary>
-        [RequiresUnreferencedCode("Resolves the task parameter type from its assembly-qualified name by reflection, which is incompatible with trimming.")]
         private static Type ResolveTaskParameterTypeByName(LoadedType loadedType, TaskPropertyInfo parameter, int indexOfParameter)
         {
             string assemblyQualifiedName =
@@ -1581,7 +1535,7 @@ namespace Microsoft.Build.BackEnd
 
                         if (isSupportedTypedTaskItem)
                         {
-                            ITaskItem taskItemOfT = CreateTaskItemOfT(taskItemValueType, finalTaskItems[0]);
+                            ITaskItem taskItemOfT = TaskParameterValueConverter.CreateTaskItemOfT(taskItemValueType, finalTaskItems[0]);
                             success = InternalSetTaskParameter(parameter, taskItemOfT);
                         }
                         else
@@ -2098,7 +2052,6 @@ namespace Microsoft.Build.BackEnd
         /// <param name="outOfProcTaskFactory">The out-of-process task factory instance.</param>
         /// <param name="scheduledNodeId">Node for which the task host should be called</param>
         /// <returns>A TaskHostTask that will execute the inner task out of process, or <code>null</code> if task creation fails.</returns>
-        [RequiresUnreferencedCode("Instantiates a task by reflecting over a task type discovered at runtime, which is incompatible with trimming.")]
         private ITask CreateTaskHostTaskForOutOfProcFactory(
             in TaskHostParameters taskIdentityParameters,
             TaskFactoryEngineContext taskFactoryEngineContext,
