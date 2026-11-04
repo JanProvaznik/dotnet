@@ -43,16 +43,16 @@
       "commitSha": "76d53a5c01a61230c53535ae84f77ab98c4a5e42"
     },
     {
-      "barId": 330768,
+      "barId": 339340,
       "path": "scenario-tests",
       "remoteUri": "https://github.com/dotnet/scenario-tests",
-      "commitSha": "e4fee26e96b91d018fe2be50bbd0adad528c0d67"
+      "commitSha": "93cdc7261dd774affd7832aaeffb22998c87d372"
     },
     {
-      "barId": 338368,
+      "barId": 339694,
       "path": "sdk",
       "remoteUri": "https://github.com/dotnet/sdk",
-      "commitSha": "c3958137afeb5265ef1928aea2137afffa73114a"
+      "commitSha": "41ef6d693eee08ff072109dc2bb909bea1a9bab4"
     },
     {
       "barId": 339073,
